@@ -1,8 +1,8 @@
-# sentrysearch
+# SentrySearch
 
 Semantic search over dashcam footage. Type what you're looking for, get a trimmed clip back.
 
-<!-- ![demo](docs/demo.gif) -->
+<video src="https://github.com/YOURUSERNAME/sentrysearch/raw/main/docs/demo.mp4" controls width="100%"></video>
 
 ## How it works
 
