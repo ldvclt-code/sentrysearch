@@ -14,7 +14,7 @@ from .base_embedder import BaseEmbedder
 
 load_dotenv()
 
-EMBED_MODEL = "gemini-embedding-2-preview"
+EMBED_MODEL = os.environ.get("SENTRYSEARCH_GEMINI_MODEL", "gemini-embedding-2-preview")
 DIMENSIONS = 768
 DEFAULT_RPM = 55
 
