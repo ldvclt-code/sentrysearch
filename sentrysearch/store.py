@@ -153,22 +153,42 @@ class SentryStore:
         )
 
     def add_chunks(self, chunks: list[dict]) -> None:
-        """Batch-store chunks. Each dict must have 'embedding' and metadata keys."""
+        """Batch-store chunks. Each dict must have 'embedding' and the
+        required metadata keys (source_file, start_time, end_time).
+
+        Any additional keys present on each chunk dict (other than the
+        embedding + chunk-internal fields like chunk_path) are carried
+        through into ChromaDB metadata. This mirrors the single
+        `add_chunk` path and lets callers stamp custom tags like
+        `source_kind` at index time without modifying this method.
+        """
         now = datetime.now(timezone.utc).isoformat()
         ids = []
         embeddings = []
         metadatas = []
 
+        # Required + automatically-stamped keys never overwrite extras.
+        # `chunk_path` is an indexing-pipeline artifact, not metadata.
+        RESERVED = {"source_file", "start_time", "end_time", "indexed_at",
+                    "embedding", "chunk_path"}
+
         for chunk in chunks:
             chunk_id = _make_chunk_id(chunk["source_file"], chunk["start_time"])
             ids.append(chunk_id)
             embeddings.append(chunk["embedding"])
-            metadatas.append({
+            meta: dict = {
                 "source_file": chunk["source_file"],
                 "start_time": float(chunk["start_time"]),
                 "end_time": float(chunk["end_time"]),
                 "indexed_at": now,
-            })
+            }
+            for key, value in chunk.items():
+                if key in RESERVED:
+                    continue
+                # ChromaDB only stores scalar metadata (str/int/float/bool).
+                if isinstance(value, (str, int, float, bool)) or value is None:
+                    meta[key] = value
+            metadatas.append(meta)
 
         self._collection.upsert(
             ids=ids,
@@ -184,8 +204,18 @@ class SentryStore:
         self,
         query_embedding: list[float],
         n_results: int = 5,
+        where: dict | None = None,
     ) -> list[dict]:
-        """Return top N results with distances and metadata."""
+        """Return top N results with distances and metadata.
+
+        `where` is forwarded to ChromaDB to filter the candidate set
+        before scoring (e.g. `{"source_kind": "ai_generated"}`). Passes
+        through unchanged so callers can express ChromaDB's full filter
+        DSL ($in, $and, etc.) when needed.
+
+        Hits include any extra metadata fields the chunk was stored
+        with so callers don't have to round-trip back to ChromaDB.
+        """
         count = self._collection.count()
         if count == 0:
             return []
@@ -193,19 +223,26 @@ class SentryStore:
         results = self._collection.query(
             query_embeddings=[query_embedding],
             n_results=min(n_results, count),
+            where=where,
         )
 
         hits = []
         for i in range(len(results["ids"][0])):
-            meta = results["metadatas"][0][i]
+            meta = results["metadatas"][0][i] or {}
             distance = results["distances"][0][i]
-            hits.append({
+            # Carry the canonical fields explicitly + every extra metadata
+            # key the chunk was stored with (source_kind, indexed_at, …).
+            hit = {
                 "source_file": meta["source_file"],
                 "start_time": meta["start_time"],
                 "end_time": meta["end_time"],
                 "score": 1.0 - distance,  # cosine distance → similarity
                 "distance": distance,
-            })
+            }
+            for key, value in meta.items():
+                if key not in hit:
+                    hit[key] = value
+            hits.append(hit)
         return hits
 
     def is_indexed(self, source_file: str) -> bool:

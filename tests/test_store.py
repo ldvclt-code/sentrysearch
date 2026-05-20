@@ -88,6 +88,45 @@ class TestSentryStore:
         assert stats["total_chunks"] == 5
         assert stats["unique_source_files"] == 1
 
+    def test_add_chunks_carries_extra_metadata(self, tmp_store):
+        """Chunks can stamp arbitrary scalar metadata (e.g. source_kind)
+        that survives the round-trip through search()."""
+        tmp_store.add_chunks([
+            {
+                "source_file": "ai.mp4", "start_time": 0.0, "end_time": 30.0,
+                "embedding": _make_embedding(seed=1.0),
+                "source_kind": "ai_generated",
+            },
+            {
+                "source_file": "real.mp4", "start_time": 0.0, "end_time": 30.0,
+                "embedding": _make_embedding(seed=2.0),
+                "source_kind": "real_footage",
+            },
+        ])
+        hits = tmp_store.search(_make_embedding(seed=1.0), n_results=5)
+        kinds = {h["source_file"]: h.get("source_kind") for h in hits}
+        assert kinds == {"ai.mp4": "ai_generated", "real.mp4": "real_footage"}
+
+    def test_search_where_clause_filters_results(self, tmp_store):
+        """A ChromaDB where clause narrows the candidate set before scoring."""
+        tmp_store.add_chunks([
+            {
+                "source_file": "ai.mp4", "start_time": 0.0, "end_time": 30.0,
+                "embedding": _make_embedding(seed=1.0),
+                "source_kind": "ai_generated",
+            },
+            {
+                "source_file": "real.mp4", "start_time": 0.0, "end_time": 30.0,
+                "embedding": _make_embedding(seed=2.0),
+                "source_kind": "real_footage",
+            },
+        ])
+        only_real = tmp_store.search(
+            _make_embedding(seed=1.0), n_results=5,
+            where={"source_kind": "real_footage"},
+        )
+        assert [h["source_file"] for h in only_real] == ["real.mp4"]
+
     def test_upsert_overwrites(self, tmp_store):
         emb1 = _make_embedding(seed=1.0)
         emb2 = _make_embedding(seed=2.0)
