@@ -18,6 +18,12 @@ EMBED_MODEL = os.environ.get("SENTRYSEARCH_GEMINI_MODEL", "gemini-embedding-2-pr
 DIMENSIONS = 768
 DEFAULT_RPM = 55
 
+# Vertex AI defaults. gemini-embedding-2-preview is served at us-central1
+# (verified 2026-06-02; the `global` location 404s for this model). The SA
+# key path mirrors the Node tools' convention (singkeo/shared/node/vertex-auth.js).
+DEFAULT_VERTEX_LOCATION = "us-central1"
+DEFAULT_VERTEX_SA_KEY_PATH = "~/.config/anika/vertex-sa-key.json"
+
 # ---------------------------------------------------------------------------
 # Rate limiter
 # ---------------------------------------------------------------------------
@@ -46,6 +52,61 @@ class _RateLimiter:
 
 class GeminiAPIKeyError(RuntimeError):
     """Raised when GEMINI_API_KEY is missing."""
+
+
+def _embed_provider() -> str:
+    """Resolve the embedding provider.
+
+    Honors SENTRYSEARCH_EMBED_PROVIDER first, then GEMINI_PROVIDER (the same
+    flag the Node tools use), defaulting to AI Studio. Returns 'vertex' or
+    'ai_studio'.
+    """
+    raw = (
+        os.environ.get("SENTRYSEARCH_EMBED_PROVIDER")
+        or os.environ.get("GEMINI_PROVIDER")
+        or "ai_studio"
+    )
+    return raw.strip().lower()
+
+
+def _make_vertex_client(genai):
+    """Build a google-genai client in Vertex AI mode.
+
+    Auth uses a GCP service-account JSON (the same one the Node tools use):
+    VERTEX_SA_KEY_PATH (default ~/.config/anika/vertex-sa-key.json). The SDK
+    picks it up via GOOGLE_APPLICATION_CREDENTIALS, which we set from that
+    path if it isn't already set. Project comes from VERTEX_PROJECT_ID or the
+    SA JSON's project_id; region from VERTEX_LOCATION (default us-central1).
+    """
+    import json
+
+    sa_path = os.path.expanduser(
+        os.environ.get("VERTEX_SA_KEY_PATH", DEFAULT_VERTEX_SA_KEY_PATH)
+    )
+    if not os.environ.get("GOOGLE_APPLICATION_CREDENTIALS") and os.path.exists(sa_path):
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = sa_path
+
+    project = os.environ.get("VERTEX_PROJECT_ID")
+    if not project:
+        try:
+            with open(sa_path) as f:
+                project = json.load(f).get("project_id")
+        except OSError as exc:
+            raise GeminiAPIKeyError(
+                "Vertex embedding provider selected but the service-account "
+                f"key is not readable at {sa_path}: {exc}\n\n"
+                "Set VERTEX_SA_KEY_PATH (or VERTEX_PROJECT_ID), or switch back "
+                "to AI Studio with GEMINI_PROVIDER=ai_studio + GEMINI_API_KEY."
+            ) from exc
+    if not project:
+        raise GeminiAPIKeyError(
+            "Vertex embedding provider selected but no project id found "
+            "(set VERTEX_PROJECT_ID or use a service-account JSON that "
+            "includes project_id)."
+        )
+
+    location = os.environ.get("VERTEX_LOCATION", DEFAULT_VERTEX_LOCATION)
+    return genai.Client(vertexai=True, project=project, location=location)
 
 
 class GeminiQuotaError(RuntimeError):
@@ -99,17 +160,25 @@ class GeminiEmbedder(BaseEmbedder):
         from google import genai
         from google.genai import types  # noqa: F811
 
-        api_key = os.environ.get("GEMINI_API_KEY")
-        if not api_key:
-            raise GeminiAPIKeyError(
-                "GEMINI_API_KEY is not set.\n\n"
-                "Run: sentrysearch init\n\n"
-                "Or set it manually:\n"
-                "  export GEMINI_API_KEY=your-key\n\n"
-                "Or use a local model instead (no API key needed):\n"
-                "  sentrysearch index <directory> --backend local"
-            )
-        self._client = genai.Client(api_key=api_key)
+        if _embed_provider() == "vertex":
+            # Vertex AI: same gemini-embedding-2-preview model (so vectors stay
+            # compatible with an AI-Studio-built index), auth via service
+            # account. Bills the GCP project credit instead of an API key.
+            self._client = _make_vertex_client(genai)
+        else:
+            api_key = os.environ.get("GEMINI_API_KEY")
+            if not api_key:
+                raise GeminiAPIKeyError(
+                    "GEMINI_API_KEY is not set.\n\n"
+                    "Run: sentrysearch init\n\n"
+                    "Or set it manually:\n"
+                    "  export GEMINI_API_KEY=your-key\n\n"
+                    "Or use Vertex AI instead (service-account auth):\n"
+                    "  export GEMINI_PROVIDER=vertex\n\n"
+                    "Or use a local model instead (no API key needed):\n"
+                    "  sentrysearch index <directory> --backend local"
+                )
+            self._client = genai.Client(api_key=api_key)
         self._limiter = _RateLimiter()
 
     def embed_video_chunk(self, chunk_path: str, verbose: bool = False) -> list[float]:
