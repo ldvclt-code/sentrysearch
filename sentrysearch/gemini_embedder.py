@@ -72,38 +72,55 @@ def _embed_provider() -> str:
 def _make_vertex_client(genai):
     """Build a google-genai client in Vertex AI mode.
 
-    Auth uses a GCP service-account JSON (the same one the Node tools use):
-    VERTEX_SA_KEY_PATH (default ~/.config/anika/vertex-sa-key.json). The SDK
-    picks it up via GOOGLE_APPLICATION_CREDENTIALS, which we set from that
-    path if it isn't already set. Project comes from VERTEX_PROJECT_ID or the
-    SA JSON's project_id; region from VERTEX_LOCATION (default us-central1).
+    Two auth modes (mirrors singkeo/shared/node/vertex-auth.js):
+      VERTEX_AUTH_MODE=gcloud — KEYLESS. Use Application Default Credentials
+        (`gcloud auth application-default login`); no SA key file. Requires
+        VERTEX_PROJECT_ID since there's no SA JSON to read project_id from.
+        For consumer (gmail) accounts that can't issue SA keys.
+      otherwise (sa) — service-account JSON at VERTEX_SA_KEY_PATH (default
+        ~/.config/anika/vertex-sa-key.json), fed to the SDK via
+        GOOGLE_APPLICATION_CREDENTIALS. Project comes from VERTEX_PROJECT_ID or
+        the SA JSON's project_id.
+    Region from VERTEX_LOCATION (default us-central1) in both modes.
     """
     import json
 
-    sa_path = os.path.expanduser(
-        os.environ.get("VERTEX_SA_KEY_PATH", DEFAULT_VERTEX_SA_KEY_PATH)
-    )
-    if not os.environ.get("GOOGLE_APPLICATION_CREDENTIALS") and os.path.exists(sa_path):
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = sa_path
-
+    keyless = os.environ.get("VERTEX_AUTH_MODE", "").strip().lower() == "gcloud"
     project = os.environ.get("VERTEX_PROJECT_ID")
-    if not project:
-        try:
-            with open(sa_path) as f:
-                project = json.load(f).get("project_id")
-        except OSError as exc:
+
+    if keyless:
+        # Do NOT set GOOGLE_APPLICATION_CREDENTIALS — let the SDK use ADC.
+        if not project:
             raise GeminiAPIKeyError(
-                "Vertex embedding provider selected but the service-account "
-                f"key is not readable at {sa_path}: {exc}\n\n"
-                "Set VERTEX_SA_KEY_PATH (or VERTEX_PROJECT_ID), or switch back "
-                "to AI Studio with GEMINI_PROVIDER=ai_studio + GEMINI_API_KEY."
-            ) from exc
-    if not project:
-        raise GeminiAPIKeyError(
-            "Vertex embedding provider selected but no project id found "
-            "(set VERTEX_PROJECT_ID or use a service-account JSON that "
-            "includes project_id)."
+                "VERTEX_AUTH_MODE=gcloud (keyless) requires VERTEX_PROJECT_ID. "
+                "Run `gcloud auth application-default login` on this host and "
+                "set VERTEX_PROJECT_ID, or use a service-account JSON instead."
+            )
+    else:
+        sa_path = os.path.expanduser(
+            os.environ.get("VERTEX_SA_KEY_PATH", DEFAULT_VERTEX_SA_KEY_PATH)
         )
+        if not os.environ.get("GOOGLE_APPLICATION_CREDENTIALS") and os.path.exists(sa_path):
+            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = sa_path
+
+        if not project:
+            try:
+                with open(sa_path) as f:
+                    project = json.load(f).get("project_id")
+            except OSError as exc:
+                raise GeminiAPIKeyError(
+                    "Vertex embedding provider selected but the service-account "
+                    f"key is not readable at {sa_path}: {exc}\n\n"
+                    "Set VERTEX_SA_KEY_PATH (or VERTEX_PROJECT_ID), switch to keyless "
+                    "with VERTEX_AUTH_MODE=gcloud, or switch back to AI Studio with "
+                    "GEMINI_PROVIDER=ai_studio + GEMINI_API_KEY."
+                ) from exc
+        if not project:
+            raise GeminiAPIKeyError(
+                "Vertex embedding provider selected but no project id found "
+                "(set VERTEX_PROJECT_ID or use a service-account JSON that "
+                "includes project_id)."
+            )
 
     location = os.environ.get("VERTEX_LOCATION", DEFAULT_VERTEX_LOCATION)
     return genai.Client(vertexai=True, project=project, location=location)
